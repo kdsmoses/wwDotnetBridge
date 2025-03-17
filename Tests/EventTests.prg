@@ -1,10 +1,11 @@
 SET SAFETY OFF
-SET PATH TO ..\Distribution
+*!*	 set to your path
+SET PATH TO "C:\Users\seank\source\wwDotnetBridge\Distribution"
 DO wwDotNetBridge
 LOCAL loBridge as wwDotNetBridge
 loBridge = CreateObject("wwDotNetBridge","V4")
 loBridge.EnableThrowOnError()
-loBridge.LoadAssembly("bin\Debug\wwDotNetBridge.Tests.dll")
+loBridge.LoadAssembly("C:\Users\seank\source\wwDotnetBridge\Tests\bin\Debug\wwDotNetBridge.Tests.dll")
 
 ? "Loopback test"
 loLoopback = loBridge.CreateInstance("Westwind.WebConnection.Tests.Loopback")
