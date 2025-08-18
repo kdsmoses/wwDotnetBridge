@@ -23,6 +23,7 @@
 #include <atlbase.h>
 #include <atlcomcli.h>
 #include <MSCorEE.h>
+#include <windows.h>
 
 #define WINDOWS TRUE;
 
@@ -178,12 +179,24 @@ BOOL CoreClrLoad(char* runtimePath, char* errorMessage, DWORD* size)
 		GetCurrentDirectory(MAX_PATH, (LPSTR)curDir);
 
 		std::string appPaths(curDir);
-
 		appPaths.append(PATH_DELIMITER);
 		appPaths.append((const char *)curDir);
 		appPaths.append(FS_SEPARATOR);
 		appPaths.append("bin");
 
+
+		// Add the directory of the executing DLL
+		char dllPath[MAX_PATH];
+		HMODULE hModule = NULL;
+		GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCSTR)&CoreClrLoad, &hModule);
+		GetModuleFileNameA(hModule, dllPath, MAX_PATH);
+		std::string dllDir(dllPath);
+		size_t const lastSlash = dllDir.rfind('\\');
+		if (lastSlash != std::string::npos) {
+			dllDir = dllDir.substr(0, lastSlash);
+			appPaths.append(PATH_DELIMITER);
+			appPaths.append(dllDir);
+		}
 
 		const char* propertyValues[] = {
 			tpaList.c_str(),
