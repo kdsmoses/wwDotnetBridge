@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text;
+#if NETFULL
 using System.Windows.Forms;
+#endif
 
 namespace Westwind.WebConnection
 {
@@ -181,7 +184,7 @@ namespace Westwind.WebConnection
             return relativeUri.ToString().Replace(oldValue: "/", newValue: "\\");
         }
 
-
+#if NETFULL
         /// <summary>
         /// Returns a filename for a file to save
         /// </summary>
@@ -283,6 +286,7 @@ namespace Westwind.WebConnection
 
             return dialog.SelectedPath;
         }
+#endif
 
         /// <summary>
         /// Deletes files based on a file spec and a given timeout.
@@ -313,17 +317,36 @@ namespace Westwind.WebConnection
         /// <param name="outputZipFile"></param>
         /// <param name="folder"></param>
         /// <returns></returns>
-        public static bool ZipFolder(string outputZipFile, string folder, bool fast)
+        public static bool ZipFolder(string outputZipFile, string folder, string fileSpec = "*.*", bool fast = false)
         {
             try
             {
                 if (File.Exists(outputZipFile))
                     File.Delete(outputZipFile);
 
-                ZipFile.CreateFromDirectory(folder, 
-                        outputZipFile, 
-                        fast ? CompressionLevel.Fastest :CompressionLevel.Optimal, 
-                        false);
+                var tokens = fileSpec.Split(new char[] { ';',',' }, StringSplitOptions.RemoveEmptyEntries);
+                var files = new List<string>();
+                foreach (var token in tokens)
+                {
+                    var filesSub = Directory.GetFiles(folder, token, SearchOption.AllDirectories);
+                    files.AddRange(filesSub);
+                }                               
+
+                using (var zipFileStream = new FileStream(outputZipFile, FileMode.Create))
+                {
+                    using (var archive = new ZipArchive(zipFileStream, ZipArchiveMode.Create))
+                    {
+                        foreach(var file in files)
+                        {
+                            // filter some files before this, or ignore some files here
+
+                            var fileName = file;
+                            var entryName = GetRelativePath(file, folder);                            
+
+                            archive.CreateEntryFromFile(fileName, entryName, fast ? CompressionLevel.Fastest : CompressionLevel.Optimal );
+                        }
+                    }
+                }
             }
             catch
             {
@@ -333,6 +356,7 @@ namespace Westwind.WebConnection
             return true;
         }
 
+        
         /// <summary>
         /// Unzips a zip file to a destination folder.
         /// </summary>
@@ -342,7 +366,7 @@ namespace Westwind.WebConnection
         public static bool UnzipFolder(string zipFile, string folder)
         {
             try
-            {
+            {                
                 ZipFile.ExtractToDirectory(zipFile, folder);
             }
             catch

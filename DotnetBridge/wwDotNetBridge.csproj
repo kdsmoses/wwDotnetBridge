@@ -1,10 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<TargetFramework>net472</TargetFramework>
-		<Version>8.1.4</Version>
-		<Authors>Rick Strahl</Authors>
-		
-		<OutputPath>..\Distribution</OutputPath>
+		<Version>8.4.5</Version>
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 
 		<Title>West Wind .NET Bridge Connector (.NET) - Open Source Version</Title>
@@ -17,8 +14,20 @@
 		<RootNamespace>wwDotnetBridge</RootNamespace>		
 		<Description>FoxPro Interop Library that makes it easier to call .NET components that are not supported directly through COM Interop.</Description>
 		<Summary>FoxPro Interop Library that makes it easier to call .NET components that are not supported directly through COM Interop.</Summary>
-		<Copyright>Rick Strahl, West Wind Technologies, 2010-2024</Copyright>
+
+		<Authors>Rick Strahl</Authors>
 		<Company>West Wind Technologies</Company>
+		<Copyright>Rick Strahl, West Wind Technologies, 2010-2025</Copyright>
+
+
+		<PackageCopyright>Rick Strahl, West Wind Technologies 2010-2025</PackageCopyright>
+		<PackageTags>Westwind ApplicationConfiguration StringUtils ReflectionUtils DataUtils FileUtils TimeUtils SerializationUtils ImageUtils Logging DAL Sql ADO.NET</PackageTags>
+		<PackageReleaseNotes></PackageReleaseNotes>
+
+		<PackageProjectUrl>http://github.com/rickstrahl/wwDotnetBridge</PackageProjectUrl>
+
+		<PackageIcon>icon.png</PackageIcon>
+		<PackageLicense>LICENSE.MD</PackageLicense>
 		<RepositoryType>Github</RepositoryType>
 		<RepositoryUrl>https://github.com/RickStrahl/wwDotnetBridge</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
@@ -29,7 +38,7 @@
 	<PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
 		<DebugType>embedded</DebugType>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
-	
+		<DocumentationFile>wwDotnetBridge.xml</DocumentationFile>
 	</PropertyGroup>
 	<PropertyGroup Condition="'$(TargetFramework)' != 'net472'">
 		<DefineConstants>NETCORE;NETSTANDARD;NETSTANDARD2_0</DefineConstants>

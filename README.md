@@ -5,12 +5,12 @@
 
 wwDotnetBridge allows you to access the vast majority of .NET components directly from FoxPro. It provides registrationless activation of .NET Components, and acts as a proxy into .NET that makes it possible to access features that native COM Interop does not support directly.
 
-To work around COM limitations, wwDotnetBridge provides many improvements and work arounds, while still using the base layer of COM Interop for the inter-process communication. Everything that works with native COM Interop also works with wwDotnetBridge - it's the same technology after all -  but you get many more support features and automatic type translations to work around the limitations.
+To work around COM limitations, wwDotnetBridge provides many improvements and work-arounds, while still using the base layer of COM Interop for the inter-process communication. Everything that works with native COM Interop also works with wwDotnetBridge - it's the same technology after all -  but you get many more support features and automatic type translations to work around the limitations.
 
 ### Links
 
 * [wwDotnetBridge Documentation](https://webconnection.west-wind.com/docs/_24n1cfw3a.htm)    
-* [wwDotnetBridge White Paper](https://west-wind.com/wconnect/weblog/ShowEntry.blog?id=57032)  
+* [wwDotnetBridge White Paper (Revisited)](https://west-wind.com/wconnect/weblog/ShowEntry.blog?id=57032)  
 * [West Wind Message Board Support](https://support.west-wind.com)  
 * [wwDotnetBridge Files](Distribution/)
 

@@ -524,49 +524,56 @@ namespace Westwind.WebConnection
         /// <returns>Object - cast to proper type</returns>
         public static object GetProperty(object instance, string property)
         {
-            return instance.GetType().GetProperty(property, ReflectionUtils.MemberAccess).GetValue(instance, null);
+            var prop = instance.GetType().GetProperty(property, ReflectionUtils.MemberAccess);
+            if (prop == null)
+                throw new InvalidOperationException("Could not find property " + property + " on object of type " + instance.GetType().FullName);
+                        
+            return prop.GetValue(instance, null);
         }
 
         /// <summary>
         /// Parses Properties and Fields including Array and Collection references.
         /// Used internally for the 'Ex' Reflection methods.
         /// </summary>
-        /// <param name="Parent"></param>
-        /// <param name="Property"></param>
+        /// <param name="parent"></param>
+        /// <param name="property"></param>
         /// <returns></returns>
-        private static object GetPropertyInternal(object Parent, string Property)
+        private static object GetPropertyInternal(object parent, string property)
         {
-            if (Property == "this" || Property == "me")
-                return Parent;
+            if (property == "this" || property == "me")
+                return parent;
 
             object result = null;
-            string pureProperty = Property;
+            string pureProperty = property;
             string indexes = null;
             bool isArrayOrCollection = false;
 
             // Deal with Array Property
-            if (Property.IndexOf("[") > -1)
+            if (property.IndexOf("[") > -1)
             {
-                pureProperty = Property.Substring(0, Property.IndexOf("["));
-                indexes = Property.Substring(Property.IndexOf("["));
+                pureProperty = property.Substring(0, property.IndexOf("["));
+                indexes = property.Substring(property.IndexOf("["));
                 isArrayOrCollection = true;
             }
 
-            var parentType = Parent.GetType();
+            var parentType = parent.GetType();
 
             if (string.IsNullOrEmpty(pureProperty))
             {
                 // most likely an indexer
-                result = Parent;
+                result = parent;
             }
             else
             {
                 // Get the member
-                MemberInfo member = Parent.GetType().GetMember(pureProperty, ReflectionUtils.MemberAccess)[0];
+                MemberInfo member = parent.GetType().GetMember(pureProperty, ReflectionUtils.MemberAccess)[0];
+                if (member == null)
+                    throw new InvalidOperationException("Could not find property " + property + " on object of type " + parent.GetType().FullName);
+
                 if (member.MemberType == MemberTypes.Property)
-                    result = ((PropertyInfo) member).GetValue(Parent, null);
+                    result = ((PropertyInfo) member).GetValue(parent, null);
                 else
-                    result = ((FieldInfo) member).GetValue(Parent);
+                    result = ((FieldInfo) member).GetValue(parent);
             }
 
             if (isArrayOrCollection)
@@ -626,12 +633,15 @@ namespace Westwind.WebConnection
         /// Retrieve a field dynamically from an object. This is a simple implementation that's
         /// straight Reflection and doesn't support indexers.
         /// </summary>
-        /// <param name="Object">Object to retreve Field from</param>
-        /// <param name="Property">name of the field to retrieve</param>
+        /// <param name="instance">Object to retreve Field from</param>
+        /// <param name="property">name of the field to retrieve</param>
         /// <returns></returns>
-        public static object GetField(object Object, string Property)
+        public static object GetField(object instance, string property)
         {
-            return Object.GetType().GetField(Property, ReflectionUtils.MemberAccess | BindingFlags.GetField).GetValue(Object);
+            var field = instance.GetType().GetField(property, ReflectionUtils.MemberAccess | BindingFlags.GetField);
+            if (field == null)
+                throw new InvalidOperationException("Could not find public field " + property + " on object of type " + instance.GetType().FullName);
+            return field.GetValue(instance);            
         }
 
 
@@ -643,10 +653,12 @@ namespace Westwind.WebConnection
         /// <param name="property">Name of the property to set</param>
         /// <param name="value">value to set it to</param>
         public static void SetProperty(object obj, string property, object value)
-        {
+        {            
             obj.GetType().GetProperty(property, ReflectionUtils.MemberAccess).SetValue(obj, value, null);
         }
 
+
+     
         /// <summary>
         /// Parses Properties and Fields including Array and Collection references.
         /// </summary>
@@ -735,11 +747,15 @@ namespace Westwind.WebConnection
         /// and doesn't support indexers.
         /// </summary>
         /// <param name="obj">Object to set property on</param>
-        /// <param name="property">Name of the field to set</param>
+        /// <param name="fieldName">Name of the field to set</param>
         /// <param name="value">value to set it to</param>
-        public static void SetField(object obj, string property, object value)
+        public static void SetField(object instance, string fieldName, object value)
         {
-            obj.GetType().GetField(property, ReflectionUtils.MemberAccess).SetValue(obj, value);
+            var field = instance.GetType().GetField(fieldName, ReflectionUtils.MemberAccess | BindingFlags.GetField | BindingFlags.SetField);
+            if (field == null)
+                throw new InvalidOperationException("Could not find public field " + fieldName + " on object of type " + instance.GetType().FullName);
+            
+            field.SetValue(instance, value);
         }
 
 
@@ -1003,7 +1019,7 @@ namespace Westwind.WebConnection
                     return parent;
 
                 // Get the member
-                return parent.GetType().InvokeMember(property, ReflectionUtils.MemberAccessCom | BindingFlags.GetProperty , null,
+                return parent.GetType().InvokeMember(property, ReflectionUtils.MemberAccessCom | BindingFlags.GetProperty | BindingFlags.GetField, null,
                     parent, null);
             }
 
