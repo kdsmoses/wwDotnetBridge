@@ -1846,7 +1846,8 @@ ENDFUNC
 FUNCTION OnCompleted(lvResult, lcMethod)
 LOCAL lParamText, lCount
 
-IF ISNULL(lvResult) OR VARTYPE(THIS.oHandler) != "O" && If the call to WaitForEvent was canceled or the handler was unsubscribed:
+IF VARTYPE(lvResult) != "O" OR VARTYPE(THIS.oHandler) != "O" && If the call to WaitForEvent was canceled or the handler was unsubscribed:
+	* Note that lvResult is sometimes an empty string. This is likely the result of a race condition. Fortunately, checking whether it is an object seems to be a reliable workaround.
 	RETURN
 ENDIF
 

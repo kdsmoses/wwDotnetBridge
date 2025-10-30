@@ -6,6 +6,7 @@ using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Westwind.WebConnection
@@ -19,13 +20,10 @@ namespace Westwind.WebConnection
         private readonly object _source;
         private readonly List<DelegateInfo> _eventHandlers = new List<DelegateInfo>();
         private readonly ConcurrentQueue<RaisedEvent> _raisedEvents = new ConcurrentQueue<RaisedEvent>();
-        private TaskCompletionSource<RaisedEvent> _completion = new TaskCompletionSource<RaisedEvent>();
+        private volatile SemaphoreSlim _signal = new SemaphoreSlim(0);
 
         public EventSubscriber(object source, String prefix = "", dynamic vfp = null)
         {
-            // Indicates that initially the client is not waiting.
-            _completion.SetResult(null);
-
             // For each event, adds a handler that calls QueueInteropEvent.
             _source = source;
             foreach (var ev in source.GetType().GetEvents())
@@ -63,18 +61,37 @@ namespace Westwind.WebConnection
 
         public void Dispose()
         {
+            if (_signal == null)
+                return;
+
+            // Unsubscribe from all events.
             foreach (var item in _eventHandlers)
                 item.EventInfo.RemoveEventHandler(_source, item.Delegate);
-            _completion.TrySetCanceled();
+
+            // Remove references to objects.
+            _eventHandlers.Clear();
+            while (_raisedEvents.TryDequeue(out _)) { }
+
+            // Release any waiting thread and dispose the semaphore.
+            _signal.Release();
+            _signal.Dispose();
+            _signal = null;
         }
 
         private void QueueInteropEvent(string name, object[] parameters)
         {
+            var signal = _signal;
+            if (signal == null)
+                return;
+
+            // Push event to queue
             var parametersArrayList = new ArrayList(parameters.Length);
             parametersArrayList.AddRange(parameters);
             var interopEvent = new RaisedEvent { Name = name, Params = parametersArrayList };
-            if (!_completion.TrySetResult(interopEvent))
-                _raisedEvents.Enqueue(interopEvent);
+            _raisedEvents.Enqueue(interopEvent);
+
+            // Release waiting thread
+            signal.Release();
         }
 
         /// <summary>
@@ -83,13 +100,15 @@ namespace Westwind.WebConnection
         /// <returns>The next event, or null if this subscriber has been disposed.</returns>
         public RaisedEvent WaitForEvent()
         {
-            if (_raisedEvents.TryDequeue(out var interopEvent)) return interopEvent;
-            _completion = new TaskCompletionSource<RaisedEvent>();
-            var task = _completion.Task;
-            
-            task.Wait();
+            var signal = _signal;
+            if (signal == null)
+                return null;
 
-            return task.IsCanceled ? null : task.Result;
+            // Wait and return the event.
+            // Since signal keeps a count, there will always be exactly one event to dequeue, except when the subscriber is disposed, in which case there will be none.
+            try { signal.Wait(); } catch (ObjectDisposedException) { }
+            _raisedEvents.TryDequeue(out var interopEvent);
+            return interopEvent;
         }
     }
 
