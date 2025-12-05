@@ -129,15 +129,11 @@ namespace Westwind.WebConnection
         /// <summary>
         /// Sets the current synchronization context to use the FoxPro main thread.
         /// </summary>
-        /// <returns>The ID of the Windows message posted when a task is ready to run.</returns>
-        public int SetSynchronizationContext(int hwnd)
+        public void SetSynchronizationContext(int hwnd)
         {
             _synchronizationContext = new FoxProSynchronizationContext(hwnd, this);
             SynchronizationContext.SetSynchronizationContext(_synchronizationContext);
-            return _synchronizationContext.PostMessageId;
         }
-
-        public void Dispatch() => _synchronizationContext.Dispatch();
 
         #region LoadAssembly Routines
 

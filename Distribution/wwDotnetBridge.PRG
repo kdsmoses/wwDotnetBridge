@@ -238,23 +238,9 @@ ENDFUNC
 *  SetSynchronizationContext
 ****************************************
 PROTECTED FUNCTION SetSynchronizationContext()
-LOCAL postMessageId
-postMessageId = this.oDotNetBridge.SetSynchronizationContext(_VFP.hWnd)
-BINDEVENT(_VFP.hWnd, postMessageId, this, "Dispatch")
+this.oDotNetBridge.SetSynchronizationContext(_VFP.hWnd)
 ENDFUNC
 *  SetSynchronizationContext
-
-
-************************************************************************
-*  Dispatch
-****************************************
-***  Function: Dispatches all queued send or post callbacks in the synchronization context.
-***    Return: nothing
-************************************************************************
-FUNCTION Dispatch(hWnd, nMsg, wParam, lParam) && Windows message handler signature
-this.oDotNetBridge.Dispatch()
-ENDFUNC
-*   Dispatch
 
 
 ************************************************************************
