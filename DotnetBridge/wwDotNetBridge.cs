@@ -131,7 +131,7 @@ namespace Westwind.WebConnection
         /// </summary>
         public void SetSynchronizationContext(int hwnd)
         {
-            _synchronizationContext = new FoxProSynchronizationContext(hwnd, this);
+            _synchronizationContext = new FoxProSynchronizationContext(hwnd);
             SynchronizationContext.SetSynchronizationContext(_synchronizationContext);
         }
 

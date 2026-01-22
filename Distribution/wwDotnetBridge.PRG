@@ -226,21 +226,12 @@ IF VARTYPE(this.oDotNetBridge) != "O"
 
 	this.oDotNetBridge.LoadAssembly("System")		
 	this.oDotNetBridge.IsThrowOnErrorEnabled = this.lThrowOnError
-	this.SetSynchronizationContext()
+	this.oDotNetBridge.SetSynchronizationContext(_VFP.hWnd)
 ENDIF
 
 RETURN this.oDotNetBridge
 ENDFUNC
 *   CreateDotNetBridge
-
-
-************************************************************************
-*  SetSynchronizationContext
-****************************************
-PROTECTED FUNCTION SetSynchronizationContext()
-this.oDotNetBridge.SetSynchronizationContext(_VFP.hWnd)
-ENDFUNC
-*  SetSynchronizationContext
 
 
 ************************************************************************
@@ -2118,7 +2109,7 @@ IF VARTYPE(this.oDotNetBridge) != "O"
 
 	*this.oDotNetBridge.LoadAssembly("System")		
 	this.oDotNetBridge.IsThrowOnErrorEnabled = this.lThrowOnError
-	this.SetSynchronizationContext()
+	this.oDotNetBridge.SetSynchronizationContext(_VFP.hWnd)
 ENDIF
 
 

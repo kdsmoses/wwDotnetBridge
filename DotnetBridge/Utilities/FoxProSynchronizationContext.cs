@@ -3,6 +3,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,16 +21,14 @@ namespace Westwind.WebConnection
     internal sealed class FoxProSynchronizationContext : SynchronizationContext
     {
         private readonly IntPtr _hwnd;
-        private readonly wwDotNetBridge _bridge;
         private readonly ConcurrentQueue<(SendOrPostCallback handler, object? state)> _postQueue = [];
         private readonly WndProcDelegate _wndProcDelegate;
         private readonly IntPtr _originalWndProc;
         private readonly uint _postMessageId;
 
-        public FoxProSynchronizationContext(int hwnd, wwDotNetBridge bridge)
+        public FoxProSynchronizationContext(int hwnd)
         {
             _hwnd = (IntPtr)hwnd;
-            _bridge = bridge;
             _wndProcDelegate = WndProc; // Prevents the delegate from being garbage collected.
             _originalWndProc = SetWindowLongPtr(_hwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
             _postMessageId = RegisterWindowMessage("FoxProSynchronizationContextDispatch");
@@ -54,7 +53,7 @@ namespace Westwind.WebConnection
             _postQueue.Enqueue((d, state));
 
             if (!PostMessage(_hwnd, _postMessageId, IntPtr.Zero, IntPtr.Zero))
-                _bridge.LastException = new OutOfMemoryException("Failed to post dispatch message.");
+                throw new OutOfMemoryException("Failed to post dispatch message.");
         }
 
         /// <summary>
@@ -70,7 +69,10 @@ namespace Westwind.WebConnection
                 }
                 catch (Exception ex)
                 {
-                    _bridge.LastException = ex;
+                    // Reports the unhandled exception as an unobserved task exception.
+                    // An event is raised by TaskScheduler.UnobservedTaskException after the task's finalizer runs.
+                    var edi = ExceptionDispatchInfo.Capture(ex);
+                    Task.Run(() => edi.Throw());
                 }
             }
         }
