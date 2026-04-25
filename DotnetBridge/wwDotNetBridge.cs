@@ -129,8 +129,9 @@ namespace Westwind.WebConnection
         /// <summary>
         /// Sets the current synchronization context to use the FoxPro main thread.
         /// </summary>
-        public void SetSynchronizationContext(int hwnd)
+        public void SetSynchronizationContext(long hwnd)
         {
+            _synchronizationContext?.Dispose();
             _synchronizationContext = new FoxProSynchronizationContext(hwnd);
             SynchronizationContext.SetSynchronizationContext(_synchronizationContext);
         }

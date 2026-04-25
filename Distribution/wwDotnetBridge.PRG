@@ -2006,6 +2006,12 @@ Class wwDotnetCoreBridge
 #ENDIF
 
 *** Custom Properties
+*** cRuntimeConfigPath: full path to the .runtimeconfig.json that specifies
+*** the .NET framework and version to load. Caller must set this before Init().
+*** Example: FULLPATH("wwDotNetBridge.runtimeconfig.json")
+cRuntimeConfigPath = ""
+
+*** cRuntimeFolder is no longer used but retained so existing code does not error.
 cRuntimeFolder = ""
 
 
@@ -2024,10 +2030,12 @@ cRuntimeFolder = ""
 ***                         If you do COM 
 ***    Return: nothing
 ************************************************************************
-FUNCTION Init(lcRuntimeFolder)
+FUNCTION Init(lcRuntimeConfigPath)
 
-IF !EMPTY(lcRuntimeFolder)
-   THIS.cRuntimeFolder = lcRuntimeFolder
+IF !EMPTY(lcRuntimeConfigPath)
+   *** lcRuntimeConfigPath is the full path to a .runtimeconfig.json file.
+   *** It specifies the .NET framework name and minimum version to load.
+   THIS.cRuntimeConfigPath = lcRuntimeConfigPath
 ENDIF
 
 *** Fail creation if the object couldn't be created
@@ -2056,36 +2064,29 @@ IF VARTYPE(this.oDotNetBridge) != "O"
 	IF this.lUseCom
 		this.oDotNetBridge = CREATEOBJECT("Westwind.wwDotNetBridge")
 	ELSE	
-		*** Remove the Zone Identifier to 'Unblock'
-	    DECLARE INTEGER DeleteFile  IN WIN32API AS dnb_DeleteFile STRING 
-   	    dnb_DeleteFile(FULLPATH("wwDotNetBridge.dll") + ":Zone.Identifier")
-		
-		#IF IS_WESTWIND
-		    dnb_DeleteFile(FULLPATH("Newtonsoft.Json.dll") + ":Zone.Identifier")
-		    dnb_DeleteFile(FULLPATH("Markdig.dll") + ":Zone.Identifier")
-		    dnb_DeleteFile(FULLPATH("Renci.SshNet.dll") + ":Zone.Identifier")
-		#ENDIF
-		
-		LOCAL ARRAY laVersion[1]
-		LOCAL lnInfos, lcVersion, lcRuntimePath
-		lcVersion = ""  && ie. 7.7.0.0
-		lnInfos = AGETFILEVERSION(laVersion,FULLPATH("wwDotnetBridge.dll"))
-		IF (lnInfos > 3)
-		    lcVersion = laVersion[4]
+		*** Validate runtimeconfig path before attempting to load
+		IF EMPTY(this.cRuntimeConfigPath)
+			this.cRuntimeConfigPath = FULLPATH("wwDotNetBridge.runtimeconfig.json")
+		ENDIF
+		IF !FILE(this.cRuntimeConfigPath)
+			this.SetError("CoreClrLoad: runtimeconfig.json not found: " + this.cRuntimeConfigPath)
+			RETURN NULL
 		ENDIF
 
-		lcRuntimePath = this.GetDotnetCoreRuntimeFolder(this.cRuntimeFolder)
-		
-		IF !DIRECTORY(lcRuntimePath)
-		   this.SetError("Couldn't locate .NET Runtime: " + this.cRuntimeFolder)
-		   RETURN NULL
-		ENDIF
-			
-		*** Load by filename - assumes the wwDotNetBridge.dll is in the Fox path
-	   	DECLARE Integer CoreClrCreateInstanceFrom IN (m.WWC_CLR_HOSTDLL) string, string, string@, integer@
+		*** Remove the Zone Identifier to 'Unblock'
+		DECLARE INTEGER DeleteFile  IN WIN32API AS dnb_DeleteFile STRING 
+		dnb_DeleteFile(FULLPATH("wwDotNetBridge.dll") + ":Zone.Identifier")
+
+		#IF IS_WESTWIND
+			dnb_DeleteFile(FULLPATH("Newtonsoft.Json.dll") + ":Zone.Identifier")
+			dnb_DeleteFile(FULLPATH("Markdig.dll") + ":Zone.Identifier")
+			dnb_DeleteFile(FULLPATH("Renci.SshNet.dll") + ":Zone.Identifier")
+		#ENDIF
+
+		DECLARE Long CoreClrCreateInstanceFrom IN (m.WWC_CLR_HOSTDLL) string, string, string@, integer@
 		lcError = SPACE(2048)
 		lnSize = LEN(lcError)
-		lnDispHandle = CoreClrCreateInstanceFrom(lcRuntimePath,lcVersion,@lcError,@lnSize)
+		lnDispHandle = CoreClrCreateInstanceFrom(this.cRuntimeConfigPath, FULLPATH("wwDotNetBridge.dll"),@lcError,@lnSize)
 
 		IF lnDispHandle < 1
 		   lcError =  LEFT(lcError,lnSize)
@@ -2137,98 +2138,6 @@ ENDIF
 ENDFUNC
 *   Unload
 
-************************************************************************
-*  FindDotnetCoreRuntime
-****************************************
-***  Function: Finds the .NET Core Runtime Path
-***    Assume:
-***      Pass: lcVersion
-***            Modes:
-***            Full Path: C:\Program Files (x86)\dotnet\shared\Microsoft.NETCore.App\2.2.5
-***            Version only: 2.2.5
-***            Partial version 2.1  or 2.2 or 3.0
-***    Return: Runtime Folder path or empty string
-************************************************************************
-FUNCTION GetDotnetCoreRuntimeFolder(lcVersion)
-LOCAL lcFolder, lnFolderId, lnResult, lcOutput, lcFolderName, lnX, lnIndex
-LOCAL lcVersion, lnParts, lcBasePath
-LOCAL laParts[1], laFolders[1,4], laVersions[1,1]
-
-
-IF !EMPTY(lcVersion) AND DIRECTORY(lcVersion)
-	RETURN ADDBS(lcVersion)
-ENDIF
-
-DECLARE INTEGER SHGetFolderPath IN Shell32.dll ;
-      INTEGER Hwnd, INTEGER nFolder, INTEGER Token, INTEGER Flags, STRING @cPath
-
-lnFolderId = 0x0026  && Program Files
-lcOutput = repl(CHR(0),256)
-lnResult = SHGetFolderPath(_VFP.hWnd,lnFolderId,0,0,@lcOutput)
-IF lnResult = 0
-   lcOutput = STRTRAN(lcOutput,CHR(0),"") + "\"
-ELSE
-   lcOutput = ""
-ENDIF
-
-IF EMPTY(lcVersion)
-  lcVersion = ""
-ENDIF
-
-lcBasePath = ADDBS(lcOutput) + "dotnet\shared\Microsoft.NETCore.App\"
-
-IF !EMPTY(lcVersion)
-   *** Check for exact folder match
-   IF DIRECTORY(lcVersion)
-      RETURN ADDBS(lcFolder)
-   ENDIF
-   
-   *** Check for exact version match
-   IF DIRECTORY(lcBasePath + lcVersion)
-      RETURN lcBasePath + lcVersion + "\"
-   ENDIF        
-ENDIF
-
-
-*** Strip out v prefix
-lcVersion = STRTRAN(TRIM(lcVersion), "v","",-1,-1,1)
-
-
-*** We have to determine the highest matching version for partial version supplied
-*** We capture folder names and pad out version parts in order to sort properly
-*** then pick the highest value
-lnFolders = ADIR(laFolders,lcBasePath + lcVersion + "*.*","D")
-IF lnFolders < 1
-   RETURN ""
-ENDIF
-
-*** Reformat folders with left padding to 3 characters and find the largest version
-DIMENSION laVersions[lnFolders,2]
-
-FOR lnX = 1 TO lnFolders
-   lcVersion = laFolders[lnX,1]
-   DIMENSION laParts[1]
-   lnParts= ALINES(laParts, lcVersion, 1, '.')
-   lcAdjusted = PADL(INT(VAL(laParts[1])),3,'0')
-   IF(lnParts > 1)
-	   lcAdjusted = lcAdjusted + "." + PADL(INT(VAL(laParts[2])),3,'0') 
-   ENDIF	   
-   IF(lnParts > 2)
-	   lcAdjusted = lcAdjusted + "." + PADL(INT(VAL(laParts[3])),3,'0') 
-   ENDIF	   
-   IF(lnParts > 3)
-     lcAdjusted = lcAdjusted + "." + PADL(INT(VAL(laParts[4])),3,'0') 
-   ENDIF	   
-   laVersions[lnx, 1] = lcAdjusted
-   laVersions[lnx, 2] = lcVersion
-ENDFOR
-
-ASORT(laVersions,1,ALEN(laVersions,1),1)
-
-lcFullVersion = laVersions[1,2]
-RETURN lcBasePath + lcFullVersion + "\"
-ENDFUNC
-
 ENDDEFINE
 *EOC wwDotnetCoreBridge 
 
@@ -2241,19 +2150,21 @@ ENDDEFINE
 ***  Function: Factory class to feed a reusable and stored instance
 ***            of the wwDotNetCoreBridge class. 
 ***    Assume: Depends on wwutils.prg
-***      Pass:
+***      Pass: lcRuntimeConfigPath - Full path to a .runtimeconfig.json
+***            that specifies the .NET framework and version to load.
+***            Example: FULLPATH("wwDotNetBridge.runtimeconfig.json")
 ***    Return: 
 ************************************************************************
-FUNCTION GetwwDotNetCoreBridge(lcVersion)
+FUNCTION GetwwDotNetCoreBridge(lcRuntimeConfigPath)
 IF VARTYPE(__DOTNETCOREBRIDGE) != "O"
-   IF EMPTY(lcVersion)       
-		lcVersion = ""
+   IF EMPTY(lcRuntimeConfigPath)       
+		lcRuntimeConfigPath = FULLPATH("wwDotNetBridge.runtimeconfig.json")
    ENDIF
 
    PUBLIC __DOTNETCOREBRIDGE
-   __DOTNETCOREBRIDGE = CREATEOBJECT("wwDotNetCoreBridge",lcVersion)
+   __DOTNETCOREBRIDGE = CREATEOBJECT("wwDotNetCoreBridge",lcRuntimeConfigPath)
    IF VARTYPE(__DOTNETCOREBRIDGE) # "O"
-      RETURN NULL
+	  RETURN NULL
    ENDIF
 ENDIF
 RETURN __DOTNETCOREBRIDGE
@@ -2262,15 +2173,14 @@ ENDFUNC
 ************************************************************************
 *  InitializeDotnetCoreVersion()
 ****************************************
-***  Function: Explicit method that simply creates a wwDotnetCoreBridge
-***            instance. Call this method at the beginning of your
-***            app to force the .NET Runtime version that will be
-***            used throughout the entire application.
+***  Function: Creates a wwDotnetCoreBridge instance and loads the
+***            .NET runtime. Call this at application startup.
 ***    Assume: Call this method in your application startup
-***      Pass: Optional: "5.0.1" or "<runtime path>"
+***      Pass: lcRuntimeConfigPath - Full path to a .runtimeconfig.json
+***            Defaults to FULLPATH("wwDotNetBridge.runtimeconfig.json")
 ***    Return: wwDotnetCoreBridge instance 
 ***            (you don't have to do anything with it)
 ************************************************************************
-FUNCTION InitializeDotnetCoreVersion(lcVersion)
-RETURN GetwwDotnetCoreBridge(lcVersion)
+FUNCTION InitializeDotnetCoreVersion(lcRuntimeConfigPath)
+RETURN GetwwDotnetCoreBridge(lcRuntimeConfigPath)
 ENDFUNC

@@ -1,308 +1,428 @@
 /*
-		.NET Core Runtime Loader Helpers
-		---------------------------------
-		(c) Rick Strahl, West Wind Technologies, 2019
-
-		This library provides the abillity to hoist a .NET Core Runtime instance
-		into another process. It works fine for loading, but this approach
-		does not support unloading and reloading.
-
-		Any attempt to unload .NET Core works, but reloading will fail.
-
-		There are two other APIs that are still under construction that
-		might prove more flexible, but it is unclear whether they will
-		support COM marshaling in the same way this approach does.
+.NET Runtime Loader using hostfxr
 */
+
+#pragma warning(disable : 26446) // Prefer to use gsl::at() instead of unchecked subscript operator
+#pragma warning(disable : 26490) // Don't use reinterpret_cast
+#pragma warning(disable : 26485) // Expression 'array-name': No array to pointer decay
+#pragma warning(disable : 26472) // Don't use a static_cast for arithmetic conversions.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <array>
 #include <string>
-
+#include <vector>
 #include <comdef.h>
 #include <atlbase.h>
 #include <atlcomcli.h>
-#include <MSCorEE.h>
 #include <windows.h>
 
-#define WINDOWS TRUE;
+#include <nethost.h>
+#include <hostfxr.h>
+#include <coreclr_delegates.h>
 
-#include "coreclrhost.h"
-#include <system_error>
+#ifdef max
+#undef max
+#endif
 
+#ifdef min
+#undef min
+#endif
 
-#define CORECLR_FILE_NAME "coreclr.dll"
-#define FS_SEPARATOR "\\"
-#define PATH_DELIMITER ";"
+// ---------------------------------------------------------------------------
+// Factory delegate -- managed side must have:
+//   [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+//   public delegate int CreatewwDotnetBridgeByRefDelegate(out IntPtr ppDispatch)
+//   public static int CreatewwDotnetBridgeByRef(out IntPtr ppDispatch)
+// ---------------------------------------------------------------------------
+typedef HRESULT(__stdcall *createWwDotnetBridgeHandler)(IDispatch **ppDispatch);
 
+// ---------------------------------------------------------------------------
+// Module-level state
+// ---------------------------------------------------------------------------
 
-//CComBSTR ClrVersion;
-void* hostHandle;
-unsigned int domainId = 0;
-HMODULE coreClr;
-int appDomainCounter = 0;
+static HMODULE g_hostfxrModule = nullptr;
+static hostfxr_handle g_hostContext = nullptr;
+static load_assembly_and_get_function_pointer_fn g_loadAssembly = nullptr;
+static createWwDotnetBridgeHandler g_createBridge = nullptr;
 
-typedef HRESULT(__stdcall* createWwDotnetBridgeHandler)(CComPtr<IDispatch>* ptr);
-createWwDotnetBridgeHandler createWwDotnetBridge;
-
-class HResultException
+struct AddressRangeInfo
 {
-	char const* const error;
-	HRESULT const hr;
-
-public:
-	HResultException(char const* error) : error(error), hr(0) {}
-	HResultException(HRESULT hr) : error(nullptr), hr(hr) {}
-
-	DWORD GetMessage(char* errorMessage)
-	{
-		auto outputSize = strlen(errorMessage);
-		if (error) {
-			strcpy_s(errorMessage, outputSize, error);
-		}
-		else {
-			std::string message = std::system_category().message(hr);
-			strcpy(errorMessage, message.c_str());
-			//sprintf_s((char *)errorMessage, outputSize, "%ws", (LPWSTR)errorMessage);
-		}
-		return strlen(errorMessage);
-	}
+	unsigned long long base;
+	unsigned long long size;
 };
-void VerifyHResult(HRESULT hr)
+
+// Handles for temporary VA reservations covering all user-mode VA above 2 GB.
+//
+// The JIT noway_assert
+//
+//   noway_assert(static_cast<int>(reinterpret_cast<intptr_t>(addr)) == (ssize_t)addr)
+//
+// fires for ANY address where the lower 32 bits have their high bit set AND
+// the upper 32 bits don't sign-extend that correctly.  On x64 Windows the only
+// user-mode range that is entirely safe is [0, 0x7FFFFFFF] (below 2 GB).
+//
+// Strategy: before hostfxr starts CoreCLR, walk all free regions from 2 GB to
+// the top of user-mode VA and reserve them all (MEM_RESERVE / PAGE_NOACCESS —
+// pure VA cost, no physical pages committed).  With the 2–4 GB band occupied by
+// existing DLLs AND the above-4 GB band now blocked by our reservations, all of
+// CoreCLR's null-base VirtualAlloc calls must satisfy from the only remaining
+// free space: below 2 GB.  Sub-2 GB addresses always satisfy the assert.
+//
+// After the runtime has committed its initial heaps and loader-heap regions the
+// reservations are released so native DLLs and heap growth above 2 GB can
+// proceed normally.  By that point all JIT-critical objects (method tables,
+// virtual call stubs, type handles) have been placed in safe sub-2 GB memory.
+static std::vector<void *> g_dangerZoneReservations;
+
+// ---------------------------------------------------------------------------
+// Misc helpers
+// ---------------------------------------------------------------------------
+
+static void PinThisModule() noexcept
 {
-	if (FAILED(hr))
-		throw HResultException(hr);
-}
-void VerifyHResult(char *msg)
-{	
-	throw HResultException(msg);
-}
-
-// Win32 directory search for .dll files
-void BuildTpaList(const char* directory, const char* extension, std::string& tpaList)
-{
-	// This will add all files with a .dll extension to the TPA list.
-	// This will include unmanaged assemblies (coreclr.dll, for example) that don't
-	// belong on the TPA list. In a real host, only managed assemblies that the host
-	// expects to load should be included. Having extra unmanaged assemblies doesn't
-	// cause anything to fail, though, so this function just enumerates all dll's in
-	// order to keep this sample concise.
-	std::string searchPath(directory);
-	searchPath.append(FS_SEPARATOR);
-	searchPath.append("*");
-	searchPath.append(extension);
-
-	WIN32_FIND_DATAA findData;
-	HANDLE fileHandle = FindFirstFileA(searchPath.c_str(), &findData);
-
-	if (fileHandle != INVALID_HANDLE_VALUE)
-	{
-		do
-		{
-			// Append the assembly to the list
-			tpaList.append(directory);			
-			tpaList.append(findData.cFileName);
-			tpaList.append(PATH_DELIMITER);
-
-			// Note that the CLR does not guarantee which assembly will be loaded if an assembly
-			// is in the TPA list multiple times (perhaps from different paths or perhaps with different NI/NI.dll
-			// extensions. Therefore, a real host should probably add items to the list in priority order and only
-			// add a file if it's not already present on the list.
-			//
-			// For this simple sample, though, and because we're only loading TPA assemblies from a single path,
-			// and have no native images, we can ignore that complication.
-		} while (FindNextFileA(fileHandle, &findData));
-		FindClose(fileHandle);
-	}
-}
-
-
-void module_handle_function() noexcept
-{
-}
-
-static std::string ReplaceAll(std::string str, const std::string & from, const std::string & to) {
-	size_t start_pos = 0;
-	while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
-		str.replace(start_pos, from.length(), to);
-		start_pos += to.length(); // Move past the replacement
-	}
-	return str;
-}
-
-std::string GetHostDirectory(HMODULE hModule)
-{
-	char path[MAX_PATH];
-	GetModuleFileNameA(hModule, path, MAX_PATH);
-	std::string dir(path);
-	size_t pos = dir.rfind(FS_SEPARATOR);
-	return (std::string::npos == pos) ? "" : dir.substr(0, pos);
-}
-
-BOOL CoreClrLoad(char* runtimePath, char* errorMessage, DWORD* size)
- {
-	// The GET_MODULE_HANDLE_EX_FLAG_PIN flag seems to prevent VFP from unloading and clearing memory.	
-	HMODULE hm = NULL;
-	void* address = module_handle_function;
-	GetModuleHandleEx(
+	static HMODULE hPinned = nullptr;
+	if (hPinned)
+		return;
+	GetModuleHandleExW(
 		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-		(LPCSTR)address,
-		&hm
-	);
+		reinterpret_cast<LPCWSTR>(&PinThisModule),
+		&hPinned);
+}
 
-	if (!runtimePath)
+static std::wstring AnsiToWide(const char *ansi)
+{
+	if (!ansi || !*ansi)
+		return {};
+	const int sz = MultiByteToWideChar(CP_ACP, 0, ansi, -1, nullptr, 0);
+	std::wstring result(static_cast<size_t>(sz) - 1, L'\0');
+	MultiByteToWideChar(CP_ACP, 0, ansi, -1, &result[0], sz);
+	return result;
+}
+
+static std::string WideToAnsi(const wchar_t *wide)
+{
+	if (!wide || !*wide)
+		return {};
+	const int sz = WideCharToMultiByte(CP_ACP, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+	std::string result(static_cast<size_t>(sz) - 1, '\0');
+	WideCharToMultiByte(CP_ACP, 0, wide, -1, &result[0], sz, nullptr, nullptr);
+	return result;
+}
+
+static std::wstring GetThisModulePath()
+{
+	std::array<wchar_t, MAX_PATH> path{};
+	HMODULE hm = nullptr;
+	GetModuleHandleExW(
+		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		reinterpret_cast<LPCWSTR>(&GetThisModulePath),
+		&hm);
+	GetModuleFileNameW(hm, std::data(path), MAX_PATH);
+	return std::wstring(std::data(path));
+}
+
+static std::wstring GetDirectoryPath(const std::wstring &path)
+{
+	if (path.empty())
+		return {};
+
+	const size_t separator = path.find_last_of(L"\\/");
+	if (separator == std::wstring::npos)
+		return {};
+
+	return path.substr(0, separator);
+}
+
+static void SetError(char *buf, DWORD *size, const char *msg) noexcept
+{
+	if (!buf || !size)
+		return;
+	const DWORD cap = (*size > 0) ? *size : 512;
+	strncpy_s(buf, cap, msg, _TRUNCATE);
+	*size = static_cast<DWORD>(strlen(buf));
+}
+
+static std::string FormatBytes(unsigned long long value)
+{
+	std::array<char, 80> msg{};
+	if (value >= 1024ULL * 1024ULL * 1024ULL * 1024ULL)
+		sprintf_s(std::data(msg), std::size(msg), "%llu bytes (%.1f TiB)", value, static_cast<double>(value) / (1024.0 * 1024.0 * 1024.0 * 1024.0));
+	else if (value >= 1024ULL * 1024ULL * 1024ULL)
+		sprintf_s(std::data(msg), std::size(msg), "%llu bytes (%.1f GiB)", value, static_cast<double>(value) / (1024.0 * 1024.0 * 1024.0));
+	else if (value >= 1024ULL * 1024ULL)
+		sprintf_s(std::data(msg), std::size(msg), "%llu bytes (%.1f MiB)", value, static_cast<double>(value) / (1024.0 * 1024.0));
+	else
+		sprintf_s(std::data(msg), std::size(msg), "%llu bytes (%.1f KiB)", value, static_cast<double>(value) / 1024.0);
+	return std::string(std::data(msg));
+}
+
+static void AppendLine(std::string &text, const std::string &line)
+{
+	text += line;
+	text += "\r\n";
+}
+
+static void AppendLine(std::string &text, const char *line)
+{
+	text += line;
+	text += "\r\n";
+}
+
+// ---------------------------------------------------------------------------
+// CoreClrLoad  (internal)
+//
+// runtimeConfigPath: full path to a .runtimeconfig.json that specifies the
+//   framework name and minimum version, e.g.:
+//     { "runtimeOptions": { "framework": {
+//         "name": "Microsoft.WindowsDesktop.App", "version": "10.0.0" } } }
+// ---------------------------------------------------------------------------
+static BOOL CoreClrLoad(const char *runtimeConfigPath, const char *assemblyPath, char *errorMessage, DWORD *size)
+{
+	PinThisModule();
+
+	if (g_hostContext != nullptr)
+		return TRUE;
+
+	if (!runtimeConfigPath || !*runtimeConfigPath)
 	{
-		strcpy(errorMessage, "Please pass in a path to a .NET Runtime version.");
-		return FALSE; // strcpy(runtimePath, "c:\\program files (x86)\\dotnet\\shared\\Microsoft.NETCore.App\\3.0.0");
+		SetError(errorMessage, size,
+				 "CoreClrLoad: runtimeConfigPath must be the full path to a .runtimeconfig.json file.");
+		return FALSE;
 	}
 
-	try {
+	std::array<wchar_t, MAX_PATH> hostfxrPath{};
+	size_t hostfxrPathLen = MAX_PATH;
 
-		// Construct the CoreCLR path
-		// For this sample, we know CoreCLR's path. For other hosts,
-		// it may be necessary to probe for coreclr.dll/libcoreclr.so
-		std::string coreClrPath(runtimePath);
-		if (coreClrPath.at(coreClrPath.length()-1) != '\\')
-			coreClrPath.append(FS_SEPARATOR);
-		coreClrPath.append(CORECLR_FILE_NAME);
+	// Disable rel32 (32-bit PC-relative) JIT encodings on AMD64.
+	// When coreclr.dll loads outside the 0–2 GB preferred range the JIT emitter
+	// may emit rel32 references to data/code that sits in the 2–4 GB zone.
+	// Those addresses do not fit in a signed 32-bit immediate and trigger
+	// noway_assert failures deep in clrjit.  Setting JitEnableOptionalRelocs=0
+	// forces _fAllowRel32 to FALSE for every method compilation, making the JIT
+	// fall back to jump-stubs and absolute encodings for all 64-bit targets.
+	SetEnvironmentVariableA("DOTNET_JitEnableOptionalRelocs", "0");
 
-		// Construct the managed library path
-		std::string managedLibraryPath(runtimePath);
+	// Block all free VA from 2 GB to the top of user space before hostfxr
+	// initialises CoreCLR.  This forces every null-base VirtualAlloc inside the
+	// runtime to land below 2 GB — the only address range where the JIT's
+	// 32-bit sign-extend immediates are unconditionally safe.
+	//
+	// Why not just block 2–4 GB?  In VFPA that band is already fully occupied by
+	// Windows/FoxPro DLLs, so CoreCLR cannot land there anyway.  Without this
+	// reservation it allocates above 4 GB instead — which also triggers the same
+	// noway_assert (0x100000000 cast to int32 = 0, which != 0x100000000 ssize_t).
+	// Blocking everything above 2 GB closes both windows simultaneously.
+	ReserveDangerZone();
 
-		coreClr = LoadLibraryExA(coreClrPath.c_str(), NULL, 0);
-		if (coreClr == NULL) {
-			// TODO: need error information here
-			VerifyHResult("Couldn't load CoreClr assembly.");
+	const int rcHostfxr = get_hostfxr_path(std::data(hostfxrPath), &hostfxrPathLen, nullptr);
+	if (rcHostfxr != 0)
+	{
+		std::array<char, 256> msg{};
+		sprintf_s(std::data(msg), std::size(msg),
+				  "CoreClrLoad: get_hostfxr_path failed (0x%08X). Install the .NET runtime or set the DOTNET_ROOT environment variable.",
+				  static_cast<unsigned>(rcHostfxr));
+		SetError(errorMessage, size, std::data(msg));
+		return FALSE;
+	}
+
+	g_hostfxrModule = LoadLibraryW(std::data(hostfxrPath));
+	if (!g_hostfxrModule)
+	{
+		std::array<char, 512> msg{};
+		sprintf_s(std::data(msg), std::size(msg),
+				  "CoreClrLoad: LoadLibrary(hostfxr) failed (error %lu).", GetLastError());
+		SetError(errorMessage, size, std::data(msg));
+		GetProcAddress(g_hostfxrModule, "hostfxr_initialize_for_runtime_config"));
+		const auto pfnGetDelegate = reinterpret_cast<hostfxr_get_runtime_delegate_fn>(
+			GetProcAddress(g_hostfxrModule, "hostfxr_get_runtime_delegate"));
+		const auto pfnClose = reinterpret_cast<hostfxr_close_fn>(
+			GetProcAddress(g_hostfxrModule, "hostfxr_close"));
+
+		const auto pfnSetRuntimePropertyValue = reinterpret_cast<hostfxr_set_runtime_property_value_fn>(
+			GetProcAddress(g_hostfxrModule, "hostfxr_set_runtime_property_value"));
+
+		if (!pfnInit || !pfnGetDelegate || !pfnClose)
+		{
+			SetError(errorMessage, size,
+					 "CoreClrLoad: Missing required exports in hostfxr.dll. .NET 5 or later is required.");
 			return FALSE;
 		}
 
-		coreclr_initialize_ptr initializeCoreClr = (coreclr_initialize_ptr)GetProcAddress(coreClr, "coreclr_initialize");
+		const std::wstring thisModulePath = GetThisModulePath();
+		const std::wstring configPathW = AnsiToWide(runtimeConfigPath);
 
-		std::string tpaList;
-		std::string desktopPath = ReplaceAll(runtimePath, "Microsoft.NETCore.App", "Microsoft.WindowsDesktop.App");
-		BuildTpaList(desktopPath.c_str(), ".dll", tpaList); // Desktop must come first so that its assemblies take precedence over .NET Core assemblies when the same assembly is present in different forms in both runtimes (e.g. WindowsBase.dll).
-		BuildTpaList(runtimePath, ".dll", tpaList);
+		hostfxr_initialize_parameters initParams{};
+		initParams.size = sizeof(initParams);
+		initParams.host_path = thisModulePath.c_str();
+		initParams.dotnet_root = nullptr;
 
-		// <Snippet3>
-		// Define CoreCLR properties
-		// Other properties related to assembly loading are common here,
-		// but for this simple sample, TRUSTED_PLATFORM_ASSEMBLIES is all
-		// that is needed. Check hosting documentation for other common properties.
-		const char* propertyKeys[] = {
-			"TRUSTED_PLATFORM_ASSEMBLIES", // Trusted assemblies
-			"APP_PATHS"  // Bin Paths
-		};
+		hostfxr_handle hCtx = nullptr;
+		const int32_t rcInit = pfnInit(configPathW.c_str(), &initParams, &hCtx);
 
-		char curDir[MAX_PATH];
-		GetCurrentDirectory(MAX_PATH, (LPSTR)curDir);
-		std::string hostDir = GetHostDirectory(hm);
-
-		std::string appPaths(curDir);
-		appPaths.append(PATH_DELIMITER);
-		appPaths.append((const char *)curDir).append(FS_SEPARATOR).append("bin");
-		if (hostDir != curDir)
+		if (rcInit != 0 && rcInit != 1)
 		{
-			appPaths.append(PATH_DELIMITER);
-			appPaths.append(hostDir.c_str());
+			std::array<char, 512> msg{};
+			sprintf_s(std::data(msg), std::size(msg),
+					  "CoreClrLoad: hostfxr_initialize_for_runtime_config failed (0x%08X). ",
+					  static_cast<unsigned>(rcInit));
+			SetError(errorMessage, size, std::data(msg));
+			const std::wstring configuredAppPaths = GetDirectoryPath(AnsiToWide(assemblyPath));
+			if (!configuredAppPaths.empty())
+			{
+				if (!pfnSetRuntimePropertyValue)
+				{
+					SetError(errorMessage, size,
+							 "CoreClrLoad: hostfxr_set_runtime_property_value is not available, so additional assembly probing paths cannot be configured.");
+					if (hCtx)
+						pfnClose(hCtx);
+					return FALSE;
+				}
+
+				const int32_t rcSetAppPaths = pfnSetRuntimePropertyValue(hCtx, L"APP_PATHS", configuredAppPaths.c_str());
+				if (rcSetAppPaths != 0)
+				{
+					std::array<char, 512> msg{};
+					sprintf_s(std::data(msg), std::size(msg),
+							  "CoreClrLoad: hostfxr_set_runtime_property_value(APP_PATHS) failed (0x%08X).",
+							  static_cast<unsigned>(rcSetAppPaths));
+					SetError(errorMessage, size, std::data(msg));
+					if (hCtx)
+						pfnClose(hCtx);
+					return FALSE;
+				}
+			}
+
+			void *loadFn = nullptr;
+			const int32_t rcDelegate = pfnGetDelegate(
+				hCtx, hdt_load_assembly_and_get_function_pointer, &loadFn);
+
+			if (rcDelegate != 0 || !loadFn)
+			{
+				std::array<char, 256> msg{};
+				sprintf_s(std::data(msg), std::size(msg),
+						  "CoreClrLoad: hostfxr_get_runtime_delegate failed (0x%08X).",
+						  static_cast<unsigned>(rcDelegate));
+				SetError(errorMessage, size, std::data(msg));
+				pfnClose(hCtx);
+				return FALSE;
+			}
+
+			// CoreCLR has now committed all its initial heaps and code regions.  Release
+			// the danger-zone reservations so the VA space is available for native DLLs.
+			ReleaseDangerZone();
+
+			g_hostContext = hCtx;
+			g_loadAssembly = static_cast<load_assembly_and_get_function_pointer_fn>(loadFn);
+			g_createBridge = nullptr;
+			return TRUE;
 		}
 
-		const char* propertyValues[] = {
-			tpaList.c_str(),
-			appPaths.c_str()
-		};
-
-		appDomainCounter++;
-		char appDomainName[50];
-		sprintf(appDomainName, "%s_%i", "wwDotNetBridge",appDomainCounter);
-
-		// This function both starts the .NET Core runtime and creates
-		// the default (and only) AppDomain
-		HRESULT hr = initializeCoreClr(
-			runtimePath,        // App base path
-			appDomainName,
-			sizeof(propertyKeys) / sizeof(char*),   // Property count
-			propertyKeys,       // Property names
-			propertyValues,     // Property values
-			&hostHandle,        // Host handle
-			&domainId);         // AppDomain ID
-
-
-		VerifyHResult(hr);
-
-		return TRUE;
-	}
-	catch (HResultException ex) {
-		ex.GetMessageA(errorMessage);
-		*size = strlen(errorMessage);
-		return FALSE;
-	}
-}
-
-// *** Unloads the CLR from the process
-DWORD WINAPI CoreClrUnload()
-{
-	coreclr_shutdown_ptr shutdownCoreClr = (coreclr_shutdown_ptr)GetProcAddress(coreClr, "coreclr_shutdown");	
-	HRESULT hr = shutdownCoreClr(hostHandle, domainId);
-	VerifyHResult(hr);
-
-	createWwDotnetBridge = NULL;
-	hostHandle = NULL;
-	domainId = 0;
-	coreClr = NULL;
-	HMODULE coreClr = 0; 
-	
-	
-	return hr;
-}
-
-
-
-/// *** Creates an instance of a class from an assembly referenced through its disk path
-IDispatch* WINAPI CoreClrCreateInstanceFrom(char *runtimePath, char *version, char *ErrorMessage, DWORD *dwErrorSize)
-{
-	if (domainId == 0)
-		CoreClrLoad(runtimePath, ErrorMessage, dwErrorSize);
-
-	try {
-		HRESULT hr;
-
-		// Create the function pointer based on signature and assembly version
-		if (createWwDotnetBridge == NULL)
+		// ---------------------------------------------------------------------------
+		// CoreClrUnload  (exported @116)
+		//
+		// Closes the hostfxr context and removes the temp runtimeconfig file.
+		// The .NET runtime itself cannot be unloaded once started.
+		// C26440: noexcept -- function does not throw
+		// ---------------------------------------------------------------------------
+		DWORD WINAPI CoreClrUnload() noexcept
 		{
-			std::string assemblyName("wwDotNetBridge, Version=");
-			assemblyName.append(version);
-			assemblyName.append(", Culture=neutral, PublicKeyToken=null");
+			if (g_hostContext && g_hostfxrModule)
+			{
+				const auto pfnClose = reinterpret_cast<hostfxr_close_fn>(
+					GetProcAddress(g_hostfxrModule, "hostfxr_close"));
+				if (pfnClose)
+					pfnClose(g_hostContext);
+			}
 
-			coreclr_create_delegate_ptr createManagedDelegate = (coreclr_create_delegate_ptr)GetProcAddress(coreClr, "coreclr_create_delegate");
+			g_hostContext = nullptr;
+			g_loadAssembly = nullptr;
+			g_createBridge = nullptr;
 
-			// this works!
-			hr = createManagedDelegate(
-				hostHandle,
-				domainId,
-				assemblyName.c_str(),
-				"Westwind.WebConnection.wwDotnetBridgeFactory",
-				"CreatewwDotnetBridgeByRef",
-				(VOID * *)& createWwDotnetBridge);
-			VerifyHResult(hr);
+			return 0;
 		}
-		
-		// Now call the factory .NET method 
 
-		// this fails - HR Error: Not Supported
-		CComPtr<IDispatch> obj;		
-		hr = createWwDotnetBridge((CComPtr<IDispatch> *) &obj);
-		VerifyHResult(hr);
+		// ---------------------------------------------------------------------------
+		// CoreClrCreateInstanceFrom  (exported @115)
+		//
+		// Parameters
+		//   runtimeConfigPath  Full path to the .runtimeconfig.json that specifies
+		//                      the .NET framework and version to load. Example:
+		//                        C:\MyApp\wwDotNetBridge.runtimeconfig.json
+		//   assemblyPath       Full path to wwDotNetBridge.dll.
+		//   errorMessage       Caller-supplied buffer, recommended >= 512 chars.
+		//   dwErrorSize        In: capacity.  Out: length of error text written.
+		//
+		// Calling convention: __stdcall -- required for 64-bit FoxPro (VFPA).
+		// ---------------------------------------------------------------------------
+		IDispatch *WINAPI CoreClrCreateInstanceFrom(
+			const char *runtimeConfigPath,
+			const char *assemblyPath,
+			char *errorMessage,
+			DWORD *dwErrorSize)
+		{
+			if (!g_hostContext)
+			{
+				if (!CoreClrLoad(runtimeConfigPath, assemblyPath, errorMessage, dwErrorSize))
+					return nullptr;
+			}
 
-		return obj;
-	}
-	catch (HResultException ex) {		
-		ex.GetMessage(ErrorMessage);
-		*dwErrorSize = strlen(ErrorMessage);
-		return NULL;
-	}
-	catch(...) {		
-		return NULL;
-	}
+			try
+			{
+				if (!g_createBridge)
+				{
+					const std::wstring asmPathW = AnsiToWide(assemblyPath);
 
-	return NULL;
-}
+					const wchar_t *typeName = L"Westwind.WebConnection.wwDotnetBridgeFactory, wwDotNetBridge";
+					const wchar_t *methodName = L"CreatewwDotnetBridgeByRef";
+					const wchar_t *delegateTypeName = L"Westwind.WebConnection.CreatewwDotnetBridgeByRefDelegate, wwDotNetBridge";
+
+					void *fnPtr = nullptr;
+					const int32_t rc = g_loadAssembly(
+						asmPathW.c_str(),
+						typeName,
+						methodName,
+						delegateTypeName,
+						nullptr,
+						&fnPtr);
+
+					if (rc != 0 || !fnPtr)
+					{
+						std::array<char, 768> msg{};
+						sprintf_s(std::data(msg), std::size(msg),
+								  "CoreClrCreateInstanceFrom: load_assembly_and_get_function_pointer failed (0x%08X). The managed assembly or one of its dependencies could not be loaded by CoreCLR, or the factory method does not match CreatewwDotnetBridgeByRefDelegate.",
+								  static_cast<unsigned>(rc));
+						SetError(errorMessage, dwErrorSize, std::data(msg));
+						return nullptr;
+					}
+
+					g_createBridge = static_cast<createWwDotnetBridgeHandler>(fnPtr);
+				}
+
+				IDispatch *pDisp = nullptr;
+				const HRESULT hr = g_createBridge(&pDisp);
+				if (FAILED(hr) || !pDisp)
+				{
+					std::array<char, 512> msg{};
+					sprintf_s(std::data(msg), std::size(msg),
+							  "CoreClrCreateInstanceFrom: managed factory returned 0x%08X.",
+							  static_cast<unsigned>(hr));
+					SetError(errorMessage, dwErrorSize, std::data(msg));
+					return nullptr;
+				}
+
+				return pDisp;
+			}
+			catch (const std::exception &ex)
+			{
+				SetError(errorMessage, dwErrorSize, ex.what());
+				return nullptr;
+			}
+			catch (...)
+			{
+				SetError(errorMessage, dwErrorSize,
+						 "CoreClrCreateInstanceFrom: unknown exception.");
+				return nullptr;
+			}
+		}

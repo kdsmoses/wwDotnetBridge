@@ -3,6 +3,9 @@ using System.Runtime.InteropServices;
 
 namespace Westwind.WebConnection
 {
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    public delegate int CreatewwDotnetBridgeByRefDelegate(out IntPtr ppDispatch);
+
     /// <summary>
     /// Can be used to create an instance of wwDotnetBridge
     /// from the .NET Core Runtime Host which requires a static method
@@ -22,16 +25,17 @@ namespace Westwind.WebConnection
             return new wwDotNetBridge();
         }
 
-        public static int CreatewwDotnetBridgeByRef([MarshalAs(UnmanagedType.IDispatch)] ref object instance)
+        public static int CreatewwDotnetBridgeByRef(out IntPtr ppDispatch)
         {
             try
             {
-                instance = new wwDotNetBridge();
+                ppDispatch = Marshal.GetIDispatchForObject(new wwDotNetBridge());
             }
-            catch
+            catch (Exception ex)
             {
-                instance = null;
-                return -1;
+                System.Diagnostics.Debug.WriteLine(ex.ToString());
+                ppDispatch = IntPtr.Zero;
+                return Marshal.GetHRForException(ex);
             }
 
             return 0;
