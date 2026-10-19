@@ -36,7 +36,7 @@ namespace wwDotnetBridge.Tests
             var subscriber = new EventSubscriber(loopback, this, "On", post, this);
             loopback.Raise();
             if (post) // Conditional to verify that dispatching is not required for immediate events (even though it is harmless).
-                _bridge.Dispatch();
+                System.Threading.SynchronizationContext.Current.OperationStarted();
             await _raisedCompletion.Task;
             Assert.ThrowsException<ArgumentException>(subscriber.Dispose); // Expect Marshal.FinalReleaseComObject to throw because our test handler is not a COM object.
         }

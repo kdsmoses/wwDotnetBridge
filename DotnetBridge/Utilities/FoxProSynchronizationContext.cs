@@ -25,6 +25,11 @@ namespace Westwind.WebConnection
         private readonly WndProcDelegate _wndProcDelegate;
         private readonly IntPtr _originalWndProc;
         private readonly uint _postMessageId;
+        private readonly Timer _repostTimer;
+        private int _dispatchPending; // 1 from posting a dispatch message until a dispatch starts.
+        private int _repostDelay;
+
+        private const int RepostDelayAfterFailure = 50, RepostDelayFirst = 1000, RepostDelayMax = 60_000; // Milliseconds.
 
         public FoxProSynchronizationContext(int hwnd)
         {
@@ -32,6 +37,7 @@ namespace Westwind.WebConnection
             _wndProcDelegate = WndProc; // Prevents the delegate from being garbage collected.
             _originalWndProc = SetWindowLongPtr(_hwnd, GWLP_WNDPROC, Marshal.GetFunctionPointerForDelegate(_wndProcDelegate));
             _postMessageId = RegisterWindowMessage("FoxProSynchronizationContextDispatch");
+            _repostTimer = new Timer(_ => PostDispatchMessage());
         }
 
         private IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -46,14 +52,40 @@ namespace Westwind.WebConnection
         }
 
         /// <summary>
-        /// Posts a message to indicate that there are posts ready to dispatch. Thread safe.
+        /// Queues a callback and, unless a dispatch message is already pending, posts one. Thread safe.
         /// </summary>
+        /// <remarks>
+        /// Never throws: the callback is queued and runs at the next dispatch either way.
+        /// One pending message dispatches every queued callback, so posts don't fill the thread's message queue (10,000 messages) while FoxPro is busy.
+        /// </remarks>
         public override void Post(SendOrPostCallback d, object? state)
         {
             _postQueue.Enqueue((d, state));
 
-            if (!PostMessage(_hwnd, _postMessageId, IntPtr.Zero, IntPtr.Zero))
-                throw new OutOfMemoryException("Failed to post dispatch message.");
+            if (Interlocked.Exchange(ref _dispatchPending, 1) == 0)
+            {
+                _repostDelay = RepostDelayFirst;
+                PostDispatchMessage();
+            }
+        }
+
+        /// <summary>
+        /// Posts the dispatch message unless a dispatch has started since it was requested,
+        /// and arms the timer to post it again if none has started by then: soon if posting failed because the message queue is full,
+        /// otherwise after a growing delay in case the message is removed without being dispatched.
+        /// </summary>
+        private void PostDispatchMessage()
+        {
+            if (Volatile.Read(ref _dispatchPending) == 0)
+                return;
+
+            int delay = RepostDelayAfterFailure;
+            if (PostMessage(_hwnd, _postMessageId, IntPtr.Zero, IntPtr.Zero))
+            {
+                delay = _repostDelay;
+                _repostDelay = Math.Min(delay * 2, RepostDelayMax);
+            }
+            _repostTimer.Change(delay, Timeout.Infinite);
         }
 
         /// <summary>
@@ -61,6 +93,7 @@ namespace Westwind.WebConnection
         /// </summary>
         private void Dispatch()
         {
+            Volatile.Write(ref _dispatchPending, 0); // Before dequeuing, so that a callback queued after the last dequeue posts a new message.
             while (_postQueue.TryDequeue(out var post))
             {
                 try

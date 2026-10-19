@@ -6,6 +6,7 @@
     <TargetFramework>net472</TargetFramework>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 	  <LangVersion>latest</LangVersion>
+    <PlatformTarget>x86</PlatformTarget> <!-- As FoxPro: FoxProSynchronizationContext subclasses its window with SetWindowLongA, which only works in a 32-bit process. -->
   </PropertyGroup>
 
   <ItemGroup>
