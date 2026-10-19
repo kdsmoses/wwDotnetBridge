@@ -48,15 +48,30 @@ namespace Westwind.WebConnection
 
         public void Dispose()
         {
+            _disposed = true;
             foreach ((var eventInfo, var eventDelegate) in _eventDelegates)
                 eventInfo.RemoveEventHandler(_eventSource, eventDelegate);
             Marshal.FinalReleaseComObject(_handler);
         }
 
+        private volatile bool _disposed;
+
         private void InvokeMethod(object handler, string methodName, object[] arguments)
         {
             if (_post || Thread.CurrentThread != wwDotNetBridge._mainThread)
-                wwDotNetBridge._synchronizationContext.Post(_ => handler.GetType().InvokeMember(methodName, BindingFlags.InvokeMethod, null, handler, arguments), null);
+                wwDotNetBridge._synchronizationContext.Post(_ =>
+                {
+                    if (_disposed)
+                        return; // Unsubscribed after the event was posted: the handler is released.
+                    try
+                    {
+                        handler.GetType().InvokeMember(methodName, BindingFlags.InvokeMethod, null, handler, arguments);
+                    }
+                    catch (Exception ex)
+                    {
+                        wwDotNetBridge.ReportCallbackException("Event handler " + methodName, ex);
+                    }
+                }, null);
             else
                 handler.GetType().InvokeMember(methodName, BindingFlags.InvokeMethod, null, handler, arguments);
         }

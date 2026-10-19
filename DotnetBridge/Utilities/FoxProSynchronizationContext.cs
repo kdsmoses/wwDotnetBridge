@@ -102,10 +102,7 @@ namespace Westwind.WebConnection
                 }
                 catch (Exception ex)
                 {
-                    // Reports the unhandled exception as an unobserved task exception.
-                    // An event is raised by TaskScheduler.UnobservedTaskException after the task's finalizer runs.
-                    var edi = ExceptionDispatchInfo.Capture(ex);
-                    Task.Run(() => edi.Throw());
+                    wwDotNetBridge.ReportCallbackException("Callback posted to FoxPro", ex);
                 }
             }
         }

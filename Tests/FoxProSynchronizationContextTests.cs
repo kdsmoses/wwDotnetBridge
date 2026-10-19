@@ -50,7 +50,7 @@ namespace wwDotnetBridge.Tests
         /// <summary>
         /// A window on a thread of its own, which pumps messages only once told to.
         /// </summary>
-        private sealed class WindowThread : IDisposable
+        internal sealed class WindowThread : IDisposable
         {
             private readonly Thread _thread;
             private readonly ManualResetEventSlim _created = new(), _pump = new();

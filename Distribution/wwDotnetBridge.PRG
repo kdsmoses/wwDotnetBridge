@@ -434,7 +434,10 @@ FUNCTION InvokeMethod(loObject, lcMethod, lvParm1, lvParm2, lvParm3, lvParm4, lv
 										  lvParm21, lvParm22, lvParm23, lvParm24)
 LOCAL loBridge, lnParms, loResult
 
-this.SetError()
+*** With lThrowOnError a failed call raises an error, so the error state is neither reset nor read back (a COM read per call)
+IF !this.lThrowOnError
+	this.SetError()
+ENDIF
 
 loBridge = this.oDotNetBridge
 
@@ -477,7 +480,7 @@ DO CASE
 	    RETURN THIS.InvokeMethod_ParameterArray(loObject, lcMethod, loArray)
 ENDCASE
 
-IF loBridge.Error
+IF !this.lThrowOnError .AND. loBridge.Error
    this.SetError(loBridge.ErrorMessage)
 ENDIF   
 
@@ -843,7 +846,10 @@ FUNCTION InvokeStaticMethod(lcTypeName, lcMethod, lvParm1, lvParm2, lvParm3, lvP
                                                   lvParm6, lvParm7, lvParm8, lvParm9, lvParm10)
 LOCAL loBridge, lnParms, loResult
 
-this.SetError()
+*** With lThrowOnError a failed call raises an error, so the error state is neither reset nor read back (a COM read per call)
+IF !this.lThrowOnError
+	this.SetError()
+ENDIF
 
 loBridge = this.oDotNetBridge
 
@@ -876,7 +882,7 @@ DO CASE
 	  loResult = loBridge.InvokeStaticMethod(lcTypeName, lcMethod)
 ENDCASE
 
-IF loBridge.Error
+IF !this.lThrowOnError .AND. loBridge.Error
    this.SetError(loBridge.ErrorMessage)
 ENDIF   
 

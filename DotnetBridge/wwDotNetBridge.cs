@@ -42,7 +42,9 @@ using System.Data;
 using System.IO;
 using System.Net;
 using System.Reflection;
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -57,6 +59,13 @@ using Newtonsoft.Json;
 
 namespace Westwind.WebConnection
 {
+    /// <summary>
+    /// Handles <see cref="wwDotNetBridge.UnhandledCallbackException"/>. Not generic, since FoxPro can't handle generic delegate types.
+    /// </summary>
+    /// <param name="message">The callback that failed and the innermost exception's message.</param>
+    /// <param name="details">The exception's full text, with its stack trace.</param>
+    public delegate void UnhandledCallbackExceptionHandler(string message, string details);
+
     /// <summary>
     /// The wwDotNetBridge class provides a host of COM support functions for Visual FoxPro.
     /// It allows you to host the .NET runtime without relying on COM interop to load types,
@@ -131,8 +140,36 @@ namespace Westwind.WebConnection
         /// </summary>
         public void SetSynchronizationContext(int hwnd)
         {
+            _mainThread = Thread.CurrentThread; // The context's thread, where EventSubscriber calls handlers directly.
             _synchronizationContext = new FoxProSynchronizationContext(hwnd);
             SynchronizationContext.SetSynchronizationContext(_synchronizationContext);
+        }
+
+        /// <summary>
+        /// Raised when a callback to FoxPro that nothing waits on fails: a posted event handler, an async method's OnCompleted or OnError, a PostMethod call, or any other posted callback.
+        /// Subscribe with SubscribeToEvents on any wwDotNetBridge instance. Without a subscriber, the exception is reported as an unobserved task exception, which surfaces only once the garbage collector finalizes it.
+        /// </summary>
+        public static event UnhandledCallbackExceptionHandler UnhandledCallbackException;
+
+        /// <summary>
+        /// Reports an exception thrown by a callback to FoxPro, naming the callback.
+        /// </summary>
+        internal static void ReportCallbackException(string callback, Exception ex)
+        {
+            var handler = UnhandledCallbackException;
+            if (handler != null)
+            {
+                try
+                {
+                    handler(callback + ": " + ex.GetBaseException().Message, ex.ToString());
+                    return;
+                }
+                catch { } // E.g. FoxPro can't take the call either: falls back to the unobserved task exception.
+            }
+
+            // An event is raised by TaskScheduler.UnobservedTaskException after the task's finalizer runs.
+            var edi = ExceptionDispatchInfo.Capture(new Exception(callback + " failed: " + ex.GetBaseException().Message, ex));
+            Task.Run(() => edi.Throw());
         }
 
         #region LoadAssembly Routines
@@ -992,7 +1029,17 @@ namespace Westwind.WebConnection
 
         internal void PostMethod_Internal(object instance, string method, params object[] args)
         {
-            _synchronizationContext.Post(_ => InvokeMethod_Now(instance, method, args), null);
+            _synchronizationContext.Post(_ =>
+            {
+                try
+                {
+                    InvokeMethod_Now(instance, method, args);
+                }
+                catch (Exception ex)
+                {
+                    ReportCallbackException("Posted method " + method, ex);
+                }
+            }, null);
         }
 
         internal object InvokeMethod_Now(object instance, string method, params object[] args)
@@ -1449,56 +1496,14 @@ namespace Westwind.WebConnection
             {
                 try
                 {
-                    result.ContinueWith((r) =>
+                    if (result == null)
                     {
-                       
-                        var t = result.GetType();
-
-                        try
-                        {
-                            
-                            if (t.IsGenericType)
-                            {
-                                object res = null;
-                                try
-                                {
-                                    res = GetProperty(result, "Result");
-                                    InvokeMethod_Internal(callBack, "onCompleted", res, method);
-                                    return;
-                                }
-                                catch
-                                {
-                                    res = "INVALIDRESULT";
-                                }
-                                if (res is "INVALIDRESULT")
-                                {
-                                    try
-                                    {
-                                        res = GetProperty(result, "Exception");
-                                        if (res != null)
-                                        {
-                                            LastException = res as Exception;
-                                            if (LastException != null)
-                                            { 
-                                                var ex = WrapException(LastException);
-                                                InvokeMethod_Internal(callBack, "onError", ex.Message, ex, method);
-                                            }
-                                        }
-                                    }
-                                    catch(Exception ex2) 
-                                    {
-                                        ex2 = WrapException(ex2);
-                                        InvokeMethod_Internal(callBack, "onError", ex2.Message, ex2, method);
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            ex = WrapException(LastException);
-                            InvokeMethod_Internal(callBack, "onError", ex.Message, ex, method);
-                        }
-                    }, TaskScheduler.FromCurrentSynchronizationContext());
+                        var ex = new InvalidOperationException(method + " did not return a Task.");
+                        LastException = ex;
+                        InvokeMethod_Internal(callBack, "onError", ex.Message, WrapException(ex), method);
+                        return;
+                    }
+                    result.ContinueWith(_ => CompleteTaskCallback(callBack, result, method), TaskScheduler.FromCurrentSynchronizationContext());
                 }
                 catch (Exception ex)
                 {
@@ -1509,6 +1514,45 @@ namespace Westwind.WebConnection
             }
 
             return;
+        }
+
+        /// <summary>
+        /// Calls the callback's OnCompleted with a finished task's result (null for a task without one, such as Task.Delay or an async Task method),
+        /// or its OnError if the task faulted or was canceled.
+        /// </summary>
+        private void CompleteTaskCallback(object callBack, Task task, string method)
+        {
+            string callbackMethod = "onCompleted";
+            try
+            {
+                object[] args;
+                if (task.IsFaulted || task.IsCanceled)
+                {
+                    Exception error = task.IsFaulted ? task.Exception : new TaskCanceledException(task);
+                    LastException = error.GetBaseException();
+                    var ex = WrapException(error);
+                    callbackMethod = "onError";
+                    args = [ex.Message, ex, method];
+                }
+                else
+                    args = [HasTaskResult(task.GetType()) ? GetProperty(task, "Result") : null, method];
+                InvokeMethod_Internal(callBack, callbackMethod, args);
+            }
+            catch (Exception ex)
+            {
+                ReportCallbackException("Task callback " + callbackMethod + " for " + method, ex);
+            }
+        }
+
+        /// <summary>
+        /// Whether a task type has a Result to pass on: Task&lt;T&gt;, but not the Task&lt;VoidTaskResult&gt; of an async Task method.
+        /// </summary>
+        private static bool HasTaskResult(Type type)
+        {
+            for (; type != null; type = type.BaseType)
+                if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(Task<>))
+                    return type.GetGenericArguments()[0].FullName != "System.Threading.Tasks.VoidTaskResult";
+            return false;
         }
 
         /// <summary>
@@ -1576,7 +1620,8 @@ namespace Westwind.WebConnection
                 {
                     try
                     {
-                        PostMethod_Internal(callBack, "onError", ex.Message, ex.GetBaseException(), method);
+                        var ex2 = WrapException(ex); // FoxPro can't take an exception type that isn't COM visible, e.g. SocketException, so the callback would fail.
+                        PostMethod_Internal(callBack, "onError", ex2.Message, ex2, method);
                     }
                     catch
                     {
@@ -2177,16 +2222,23 @@ namespace Westwind.WebConnection
             if (string.IsNullOrEmpty(typeName))
                 return null;
 
-            Type type = null;
+            if (_typesByName.TryGetValue(typeName, out var type))
+                return type;
+
             foreach (Assembly ass in AppDomain.CurrentDomain.GetAssemblies())
             {
-                type = ass.GetType(typeName, false);                
+                type = ass.GetType(typeName, false);
                 if (type != null)
+                {
+                    _typesByName[typeName] = type; // Only found types, since one not found may come with an assembly loaded later. Assemblies loaded later come later in the search, so a cached type stays the first match.
                     break;
+                }
             }
 
             return type;
         }
+
+        private static readonly ConcurrentDictionary<string, Type> _typesByName = new();
 
         /// <summary>
         /// Returns an array of objects with Assembly information     

@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<TargetFramework>net472</TargetFramework>
-		<Version>8.4.6</Version>
+		<Version>8.4.7</Version>
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 
 		<Title>West Wind .NET Bridge Connector (.NET) - Open Source Version</Title>
