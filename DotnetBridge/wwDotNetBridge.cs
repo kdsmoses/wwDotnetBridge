@@ -126,13 +126,33 @@ namespace Westwind.WebConnection
             return ass;
         }
 
+        /// <summary>Raised after retained callbacks can dispatch again; subscribe with posted delivery.</summary>
+        public event Action<string> DispatchQueueRecovered;
+
+        /// <summary>Raised once when quota exhaustion begins, outside scheduling locks; may run on a background thread. Correlate EpisodeId with recovery, since notification delivery can race.</summary>
+        public event Action<string> DispatchQueueExhausted;
+
         /// <summary>
         /// Sets the current synchronization context to use the FoxPro main thread.
         /// </summary>
         public void SetSynchronizationContext(int hwnd)
         {
-            _synchronizationContext = new FoxProSynchronizationContext(hwnd);
+            _synchronizationContext?.Dispose();
+            _synchronizationContext = new FoxProSynchronizationContext(hwnd,
+                diagnostic => DispatchQueueRecovered?.Invoke(diagnostic),
+                NotifyDispatchQueueExhausted);
             SynchronizationContext.SetSynchronizationContext(_synchronizationContext);
+        }
+
+        private void NotifyDispatchQueueExhausted(string diagnostic)
+        {
+            var subscribers = DispatchQueueExhausted;
+            if (subscribers == null) return;
+            foreach (Action<string> subscriber in subscribers.GetInvocationList())
+            {
+                try { subscriber(diagnostic); }
+                catch { } // A diagnostic subscriber cannot prevent recovery or another observer.
+            }
         }
 
         #region LoadAssembly Routines

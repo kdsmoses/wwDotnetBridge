@@ -14,6 +14,7 @@ namespace wwDotnetBridge.Tests
     [TestClass]
     public class EventSubscriberTests
     {
+        private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
         private readonly wwDotNetBridge _bridge = new();
         private readonly TaskCompletionSource<object> _raisedCompletion = new();
         private bool _onNoParamsRaised;
@@ -25,20 +26,26 @@ namespace wwDotnetBridge.Tests
         }
 
         [TestMethod]
+        [Timeout(5000)]
         public Task EventSubscriber_RaiseImmediateEvent() => RaiseEvent(false);
 
         [TestMethod]
+        [Timeout(5000)]
         public Task EventSubscriber_RaisePostedEvent() => RaiseEvent(true);
 
         private async Task RaiseEvent(bool post)
         {
             var loopback = new Loopback();
             var subscriber = new EventSubscriber(loopback, this, "On", post, this);
-            loopback.Raise();
-            if (post) // Conditional to verify that dispatching is not required for immediate events (even though it is harmless).
-                _bridge.Dispatch();
-            await _raisedCompletion.Task;
-            Assert.ThrowsException<ArgumentException>(subscriber.Dispose); // Expect Marshal.FinalReleaseComObject to throw because our test handler is not a COM object.
+            try
+            {
+                loopback.Raise();
+                await _raisedCompletion.Task.WaitAsync(TestTimeout);
+            }
+            finally
+            {
+                subscriber.Dispose();
+            }
         }
 
         public void OnNoParams()

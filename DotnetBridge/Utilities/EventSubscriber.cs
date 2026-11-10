@@ -17,9 +17,10 @@ namespace Westwind.WebConnection
         private readonly object _eventSource;
         private readonly object _handler;
         private readonly bool _post;
+        private int _disposed;
         private readonly List<(EventInfo, Delegate)> _eventDelegates = [];
 
-        private static readonly MethodInfo invokeMethod = typeof(EventSubscriber).GetMethod(nameof(InvokeMethod), BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly MethodInfo invokeMethod = typeof(EventSubscriber).GetMethod(nameof(InvokeMethod), BindingFlags.NonPublic | BindingFlags.Instance)!;
 
         public EventSubscriber(object eventSource, object handler, string prefix, bool post, dynamic vfp)
         {
@@ -37,7 +38,7 @@ namespace Westwind.WebConnection
                     continue;
 
                 var eventHandlerType = eventInfo.EventHandlerType;
-                var paramExpressions = eventHandlerType.GetMethod("Invoke").GetParameters().Select(p => Expression.Parameter(p.ParameterType, p.Name)).ToArray();
+                var paramExpressions = eventHandlerType!.GetMethod("Invoke")!.GetParameters().Select(p => Expression.Parameter(p.ParameterType, p.Name)).ToArray();
                 var arguments = paramExpressions.Select(p => Expression.Convert(p, typeof(object))).ToArray();
                 var callExpression = Expression.Call(instanceExpression, invokeMethod, handlerExpression, Expression.Constant(methodName), Expression.NewArrayInit(typeof(object), arguments));
                 var eventDelegate = Expression.Lambda(eventHandlerType, callExpression, paramExpressions).Compile();
@@ -48,15 +49,23 @@ namespace Westwind.WebConnection
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             foreach ((var eventInfo, var eventDelegate) in _eventDelegates)
                 eventInfo.RemoveEventHandler(_eventSource, eventDelegate);
-            Marshal.FinalReleaseComObject(_handler);
+            if (Marshal.IsComObject(_handler))
+                Marshal.FinalReleaseComObject(_handler);
         }
 
         private void InvokeMethod(object handler, string methodName, object[] arguments)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+                return;
             if (_post || Thread.CurrentThread != wwDotNetBridge._mainThread)
-                wwDotNetBridge._synchronizationContext.Post(_ => handler.GetType().InvokeMember(methodName, BindingFlags.InvokeMethod, null, handler, arguments), null);
+                wwDotNetBridge._synchronizationContext.Post(_ =>
+                {
+                    if (Volatile.Read(ref _disposed) == 0)
+                        handler.GetType().InvokeMember(methodName, BindingFlags.InvokeMethod, null, handler, arguments);
+                }, null);
             else
                 handler.GetType().InvokeMember(methodName, BindingFlags.InvokeMethod, null, handler, arguments);
         }

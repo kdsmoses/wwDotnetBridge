@@ -1,6 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
-		<TargetFramework>net472</TargetFramework>
+		<TargetFramework>net9.0-windows</TargetFramework>
 		<Version>8.4.5</Version>
 		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
 
@@ -68,6 +68,7 @@
 
 	<ItemGroup>
 	  <Folder Include="Properties\" />
+      <InternalsVisibleTo Include="wwDotNetBridge.Tests" />
 	</ItemGroup>
 
 </Project>
